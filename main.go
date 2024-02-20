@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/gob"
 	"errors"
 	"flag"
 	"fmt"
@@ -23,8 +25,9 @@ type container struct {
 }
 
 var bucket = container{
-        data : map[string]string{ }, 
+	data: map[string]string{},
 }
+
 type Command string
 
 const NOREPLY = "noreply"
@@ -41,6 +44,11 @@ type InputRequest struct {
 	exptime   uint16
 	byteCount uint64
 	opts      map[string]bool
+}
+
+type Response struct {
+	status int
+	data   string
 }
 
 func parseInput(line string) (*InputRequest, error) {
@@ -94,11 +102,28 @@ func handle(conn net.Conn) {
 			if err != nil {
 				fmt.Fprintf(conn, "error occurred %s", err.Error())
 			}
+			var res Response
 			if input.cmd == GET {
-				handleGet(input)
+				res = handleGet(input)
 			} else if input.cmd == SET {
-                                
-				handleSet(input)
+				data := make([]byte, input.byteCount)
+				_, err := reader.Read(data)
+				if err != nil {
+					fmt.Fprintf(conn, "error occurred %s", err.Error())
+				}
+				res = handleSet(input, string(data))
+			}
+			serializedRes, err := serializeResponse(res)
+			if err != nil {
+				fmt.Fprintf(conn, "error occured %s", err.Error())
+				continue
+			}
+			n, err := conn.Write(serializedRes)
+			if err != nil {
+				fmt.Fprintf(conn, "error occured %s", err.Error())
+				continue
+			} else {
+				log.Printf("Wrote %d bytes to the client connection\n", n)
 			}
 
 		}
@@ -106,14 +131,41 @@ func handle(conn net.Conn) {
 	}
 }
 
-func handleGet(request *InputRequest) {
-        bucket.mu.Lock()
-        defer bucket.mu.Unlock()
-        byteCount := request.byteCount
-
+func serializeResponse(res Response) ([]byte, error) {
+	result := []byte{}
+	buffer := bytes.NewBuffer(result)
+	enc := gob.NewEncoder(buffer)
+	err := enc.Encode(res)
+	if err != nil {
+		return []byte{}, err
+	}
+	return result, nil
 }
 
-func handleSet(request *InputRequest){}
+func handleGet(request *InputRequest) Response {
+	bucket.mu.Lock()
+	defer bucket.mu.Unlock()
+	response := Response{}
+	val, found := bucket.data[request.key]
+	if !found {
+		response.status = 404
+	} else {
+		response.status = 200
+		response.data = val
+	}
+	return response
+}
+
+func handleSet(request *InputRequest, data string) Response {
+
+        bucket.mu.Lock()
+        defer bucket.mu.Unlock()
+        res := Response{}
+        bucket.data[request.key] = data 
+        res.status=200
+        res.data = data 
+        return res
+}
 
 func main() {
 	var (
