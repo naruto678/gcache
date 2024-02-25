@@ -41,6 +41,8 @@ var (
 	SET Command = "set"
 	ADD Command = "add"
 	REPLACE Command = "replace"
+	APPEND Command = "append"
+	PREPEND Command = "prepend"
 )
 
 type InputRequest struct {
@@ -73,7 +75,7 @@ func parseInput(line string) (*InputRequest, error) {
 
 	log.Printf("Got line %s before parsing\n", fields)
 
-	if fields[0] == string(SET) || fields[0] == string(REPLACE) || fields[0]== string(ADD) {
+	if fields[0] == string(SET) || fields[0] == string(REPLACE) || fields[0]== string(ADD) || fields[0]==string(PREPEND) || fields[0] == string(APPEND) {
 		if len(fields) < 5 {
 			return nil, clientParseError
 		}
@@ -134,7 +136,7 @@ func handle(conn net.Conn) {
 					write(conn, fmt.Sprintf("%s\n", res.Data), input)
 					write(conn, "END\n", input)
 				}
-			} else if input.cmd == SET || input.cmd==REPLACE || input.cmd==ADD {
+			} else if input.cmd == SET || input.cmd==REPLACE || input.cmd==ADD || input.cmd == APPEND || input.cmd == PREPEND {
 				data, err := reader.ReadString('\n')
 				if err != nil {
 					fmt.Fprintf(conn, "error occured %s", err.Error())
@@ -223,12 +225,28 @@ func handleSet(request *InputRequest, data string) Response {
 			res.Status = 300
 			return res
 		}
+	} else if request.cmd == PREPEND {
+		val, found := bucket.data[request.key]
+		if found {
+			data = data + val
+		} else {
+			res.Status =300
+			return res
+		}
+	} else if request.cmd == APPEND {
+		val, found := bucket.data[request.key]
+		if found {
+			data = val + data
+		} else {
+			res.Status = 300
+			return res
+		}
 	}
 
 	if request.exptime == 0 {
 		request.exptime = 1000000
 	}
-	log.Printf("equest exptime ", request.exptime)
+	log.Printf("request exptime ", request.exptime)
 
 	bucket.data[request.key] = data
 	bucket.flags[request.key] = request.flag
