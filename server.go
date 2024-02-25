@@ -298,7 +298,9 @@ func (s Server) Run() {
 
 	}()
 	sig := <-s.sigChan
-	fmt.Printf("Received %v signal. doing graceful shutdown\n", sig)
+
+	// TODO: Either save the cache in some file to be reloaded during startup. TBD
+	fmt.Printf("Received %v signal. doing graceful shutdown\n.", sig)
 }
 
 func (s Server) Close() {
