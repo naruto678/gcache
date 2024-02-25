@@ -290,9 +290,9 @@ func (s Server) Run() {
 			if err != nil {
 				fmt.Println(err)
 			}
-			go func(conn net.Conn) {
+			go func(clientConn net.Conn) {
 				defer clientConn.Close()
-				handle(conn)
+				handle(clientConn)
 			}(clientConn)
 		}
 
