@@ -14,21 +14,22 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 var clientParseError = errors.New("Unable to parse")
 
 type container struct {
-	mu   sync.Mutex
-	data map[string]string
-	flags map[string]uint16
-	exptimes map[string]uint16
+	mu       sync.Mutex
+	data     map[string]string
+	flags    map[string]int
+	exptimes map[string]time.Time
 }
 
 var bucket = container{
-	data: map[string]string{},
-	flags : map[string]uint16{},
-	exptimes :map[string]uint16{},
+	data:     map[string]string{},
+	flags:    map[string]int{},
+	exptimes: map[string]time.Time{},
 }
 
 type Command string
@@ -41,21 +42,21 @@ var (
 )
 
 type InputRequest struct {
-	cmd       Command
-	key       string
-	flag      uint16
-	exptime   uint16
-	byteCount uint64
-	opts      map[string]bool
+	cmd         Command
+	key         string
+	flag        int
+	exptime     int
+	byteCount   int
+	opts        map[string]bool
+	requestTime time.Time
 }
-
 
 type Response struct {
 	Status    int
 	Data      string
-	flag      uint16
-	byteCount uint16
-	exptime   uint16
+	flag      int
+	byteCount int
+	exptime   time.Time
 }
 
 func parseInput(line string) (*InputRequest, error) {
@@ -63,32 +64,34 @@ func parseInput(line string) (*InputRequest, error) {
 	// the thing looks like this
 	//<command name> <key> <flags> <exptime> <byte count> [noreply]\r\n
 	fields := strings.Fields(line)
-	req := &InputRequest{}
+	req := &InputRequest{
+		requestTime: time.Now(),
+	}
 	req.opts = map[string]bool{}
 
-	//log.Printf("Got line %s before parsing\n", fields)
+	log.Printf("Got line %s before parsing\n", fields)
 
 	if fields[0] == string(SET) {
 		if len(fields) < 5 {
 			return nil, clientParseError
 		}
 		req.cmd = SET
-		flagField, err := strconv.ParseUint(fields[2], 10, 64)
+		flagField, err := strconv.ParseInt(fields[2], 10, 64)
 		if err != nil {
 			return nil, err
 		}
-		req.flag = uint16(flagField)
+		req.flag = int(flagField)
 		req.key = fields[1]
-		expField, err := strconv.ParseUint(fields[3], 10, 64)
+		expField, err := strconv.ParseInt(fields[3], 10, 64)
 		if err != nil {
 			return nil, err
 		}
-		req.exptime = uint16(expField)
-		byteField, err := strconv.ParseUint(fields[4], 10, 64)
+		req.exptime =int(expField)
+		byteField, err := strconv.ParseInt(fields[4], 10, 64)
 		if err != nil {
 			return nil, clientParseError
 		}
-		req.byteCount = byteField
+		req.byteCount = int(byteField)
 		if len(fields) > 5 && fields[5] == NOREPLY {
 			req.opts[NOREPLY] = true
 		}
@@ -125,7 +128,7 @@ func handle(conn net.Conn) {
 				if res.Status != 200 {
 					write(conn, "END\n", input)
 				} else {
-					write(conn, fmt.Sprintf("VALUE %s %d %d\n", input.key, res.flag, res.byteCount) ,input)
+					write(conn, fmt.Sprintf("VALUE %s %d %d\n", input.key, res.flag, res.byteCount), input)
 					write(conn, fmt.Sprintf("%s\n", res.Data), input)
 					write(conn, "END\n", input)
 				}
@@ -154,7 +157,7 @@ func write(conn net.Conn, data string, input *InputRequest) {
 	if input.opts[NOREPLY] {
 		return
 	}
-	n, err := conn.Write([]byte(data))
+	_, err := conn.Write([]byte(data))
 	if err != nil {
 		log.Println(err)
 		return
@@ -182,11 +185,20 @@ func handleGet(request *InputRequest) Response {
 	} else {
 		flag := bucket.flags[request.key]
 		exptime := bucket.exptimes[request.key]
-		response.flag = flag
-		response.exptime = exptime
-		response.Status = 200
-		response.Data = val
-		response.byteCount = uint16(len(val))
+
+		if request.requestTime.After(exptime) {
+			log.Printf("Deleting the expired value from the bucket")
+			delete(bucket.data,request.key)
+			delete(bucket.exptimes, request.key)
+			delete(bucket.flags, request.key)
+			response.Status = 300
+		} else {
+			response.flag = flag
+			response.exptime = exptime
+			response.Status = 200
+			response.Data = val
+			response.byteCount = len(val)
+		}
 	}
 	return response
 }
@@ -198,7 +210,7 @@ func handleSet(request *InputRequest, data string) Response {
 	res := Response{}
 	bucket.data[request.key] = data
 	bucket.flags[request.key] = request.flag
-	bucket.exptimes[request.key] = request.exptime
+	bucket.exptimes[request.key] = request.requestTime.Add(time.Duration(request.exptime) * time.Second)
 	res.Status = 200
 	res.Data = data
 	//log.Printf("set key = %s for value %s\n", request.key, data)
