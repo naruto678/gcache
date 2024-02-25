@@ -224,6 +224,12 @@ func handleSet(request *InputRequest, data string) Response {
 			return res
 		}
 	}
+
+	if request.exptime == 0 {
+		request.exptime = 1000000
+	}
+	log.Printf("equest exptime ", request.exptime)
+
 	bucket.data[request.key] = data
 	bucket.flags[request.key] = request.flag
 	bucket.exptimes[request.key] = request.requestTime.Add(time.Duration(request.exptime) * time.Second)
