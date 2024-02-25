@@ -1,19 +1,19 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
-        "strconv"
-        "bytes"
-        "bufio"
-        "log"
-        "encoding/gob"
 )
 
 var clientParseError = errors.New("Unable to parse")
@@ -21,10 +21,14 @@ var clientParseError = errors.New("Unable to parse")
 type container struct {
 	mu   sync.Mutex
 	data map[string]string
+	flags map[string]uint16
+	exptimes map[string]uint16
 }
 
 var bucket = container{
 	data: map[string]string{},
+	flags : map[string]uint16{},
+	exptimes :map[string]uint16{},
 }
 
 type Command string
@@ -32,8 +36,8 @@ type Command string
 const NOREPLY = "noreply"
 
 var (
-	GET Command = "GET"
-	SET Command = "SET"
+	GET Command = "get"
+	SET Command = "set"
 )
 
 type InputRequest struct {
@@ -45,9 +49,13 @@ type InputRequest struct {
 	opts      map[string]bool
 }
 
+
 type Response struct {
-	Status int
-	Data   string
+	Status    int
+	Data      string
+	flag      uint16
+	byteCount uint16
+	exptime   uint16
 }
 
 func parseInput(line string) (*InputRequest, error) {
@@ -57,7 +65,13 @@ func parseInput(line string) (*InputRequest, error) {
 	fields := strings.Fields(line)
 	req := &InputRequest{}
 	req.opts = map[string]bool{}
+
+	//log.Printf("Got line %s before parsing\n", fields)
+
 	if fields[0] == string(SET) {
+		if len(fields) < 5 {
+			return nil, clientParseError
+		}
 		req.cmd = SET
 		flagField, err := strconv.ParseUint(fields[2], 10, 64)
 		if err != nil {
@@ -72,8 +86,9 @@ func parseInput(line string) (*InputRequest, error) {
 		req.exptime = uint16(expField)
 		byteField, err := strconv.ParseUint(fields[4], 10, 64)
 		if err != nil {
-			req.byteCount = byteField
+			return nil, clientParseError
 		}
+		req.byteCount = byteField
 		if len(fields) > 5 && fields[5] == NOREPLY {
 			req.opts[NOREPLY] = true
 		}
@@ -100,30 +115,32 @@ func handle(conn net.Conn) {
 			input, err := parseInput(line)
 			if err != nil {
 				fmt.Fprintf(conn, "error occurred %s", err.Error())
+				break
 			}
-			log.Printf("received input %v\n", input)
+			//log.Printf("received input %v\n", input)
 			var res Response
 			if input.cmd == GET {
 				res = handleGet(input)
-			} else if input.cmd == SET {
-				data := make([]byte, input.byteCount)
-				_, err := reader.Read(data)
-				if err != nil {
-					fmt.Fprintf(conn, "error occurred %s", err.Error())
+				log.Println("GET", res.Status, res.Data)
+				if res.Status != 200 {
+					write(conn, "END\n", input)
+				} else {
+					write(conn, fmt.Sprintf("VALUE %s %d %d\n", input.key, res.flag, res.byteCount) ,input)
+					write(conn, fmt.Sprintf("%s\n", res.Data), input)
+					write(conn, "END\n", input)
 				}
-				res = handleSet(input, string(data))
-			}
-			serializedRes, err := serializeResponse(res)
-			if err != nil {
-				fmt.Fprintf(conn, "error occured %s", err.Error())
-				continue
-			}
-			n, err := conn.Write(serializedRes)
-			if err != nil {
-				fmt.Fprintf(conn, "error occured %s", err.Error())
-				continue
-			} else {
-				log.Printf("Wrote %d bytes to the client connection\n", n)
+			} else if input.cmd == SET {
+				data, err := reader.ReadString('\n')
+				if err != nil {
+					fmt.Fprintf(conn, "error occured %s", err.Error())
+				}
+				res = handleSet(input, string([]byte(data)[:input.byteCount]))
+				if res.Status == 200 {
+					if !input.opts[NOREPLY] {
+						write(conn, "STORED\n", input)
+					}
+				}
+				log.Println("SET", res.Status, res.Data)
 			}
 
 		} else {
@@ -133,15 +150,26 @@ func handle(conn net.Conn) {
 	}
 }
 
+func write(conn net.Conn, data string, input *InputRequest) {
+	if input.opts[NOREPLY] {
+		return
+	}
+	n, err := conn.Write([]byte(data))
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	//log.Printf("Wrote %d bytes to the client\n", n)
+}
+
 func serializeResponse(res Response) ([]byte, error) {
-	result := []byte{}
-	buffer := bytes.NewBuffer(result)
-	enc := gob.NewEncoder(buffer)
+	buffer := bytes.NewBuffer([]byte{})
+	enc := json.NewEncoder(buffer)
 	err := enc.Encode(res)
 	if err != nil {
-		return []byte{}, err
+		log.Println(err.Error())
 	}
-	return result, nil
+	return buffer.Bytes(), nil
 }
 
 func handleGet(request *InputRequest) Response {
@@ -152,20 +180,29 @@ func handleGet(request *InputRequest) Response {
 	if !found {
 		response.Status = 404
 	} else {
+		flag := bucket.flags[request.key]
+		exptime := bucket.exptimes[request.key]
+		response.flag = flag
+		response.exptime = exptime
 		response.Status = 200
 		response.Data = val
+		response.byteCount = uint16(len(val))
 	}
 	return response
 }
 
 func handleSet(request *InputRequest, data string) Response {
-
+	//log.Printf("received set request [%v] with data [%s] ", request, data)
 	bucket.mu.Lock()
 	defer bucket.mu.Unlock()
 	res := Response{}
 	bucket.data[request.key] = data
+	bucket.flags[request.key] = request.flag
+	bucket.exptimes[request.key] = request.exptime
 	res.Status = 200
 	res.Data = data
+	//log.Printf("set key = %s for value %s\n", request.key, data)
+	//log.Printf("bucket %v", bucket.data)
 	return res
 }
 
@@ -188,10 +225,11 @@ func (s Server) Run() {
 	signal.Notify(s.sigChan, syscall.SIGTERM, syscall.SIGKILL, syscall.SIGINT)
 
 	conn, err := net.Listen("tcp", fmt.Sprintf("%s:%d", s.host, s.port))
-	defer conn.Close()
 	if err != nil {
 		panic(err)
 	}
+	defer conn.Close()
+	fmt.Printf("Listening on incoming connections on %s:%d\n", s.host, s.port)
 
 	go func() {
 
