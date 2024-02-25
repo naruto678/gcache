@@ -39,6 +39,8 @@ const NOREPLY = "noreply"
 var (
 	GET Command = "get"
 	SET Command = "set"
+	ADD Command = "add"
+	REPLACE Command = "replace"
 )
 
 type InputRequest struct {
@@ -71,11 +73,11 @@ func parseInput(line string) (*InputRequest, error) {
 
 	log.Printf("Got line %s before parsing\n", fields)
 
-	if fields[0] == string(SET) {
+	if fields[0] == string(SET) || fields[0] == string(REPLACE) || fields[0]== string(ADD) {
 		if len(fields) < 5 {
 			return nil, clientParseError
 		}
-		req.cmd = SET
+		req.cmd = Command(fields[0])
 		flagField, err := strconv.ParseInt(fields[2], 10, 64)
 		if err != nil {
 			return nil, err
@@ -132,18 +134,19 @@ func handle(conn net.Conn) {
 					write(conn, fmt.Sprintf("%s\n", res.Data), input)
 					write(conn, "END\n", input)
 				}
-			} else if input.cmd == SET {
+			} else if input.cmd == SET || input.cmd==REPLACE || input.cmd==ADD {
 				data, err := reader.ReadString('\n')
 				if err != nil {
 					fmt.Fprintf(conn, "error occured %s", err.Error())
 				}
+				// TODO: give proper naming convention here you piece of shit
 				res = handleSet(input, string([]byte(data)[:input.byteCount]))
 				if res.Status == 200 {
-					if !input.opts[NOREPLY] {
 						write(conn, "STORED\n", input)
-					}
+				} else {
+					write(conn, "NOT_STORED\n", input)
 				}
-				log.Println("SET", res.Status, res.Data)
+
 			}
 
 		} else {
@@ -208,6 +211,19 @@ func handleSet(request *InputRequest, data string) Response {
 	bucket.mu.Lock()
 	defer bucket.mu.Unlock()
 	res := Response{}
+	if request.cmd == ADD {
+		_, found := bucket.data[request.key]
+		if found {
+			res.Status = 300
+			return res
+		}
+	} else if request.cmd == REPLACE {
+		_, found := bucket.data[request.key]
+		if !found {
+			res.Status = 300
+			return res
+		}
+	}
 	bucket.data[request.key] = data
 	bucket.flags[request.key] = request.flag
 	bucket.exptimes[request.key] = request.requestTime.Add(time.Duration(request.exptime) * time.Second)
